@@ -1,19 +1,22 @@
-function [signal_mod,packet] = LoRa_Tx(message,Bandwidth,SF,Pt,Fs,df,varargin)
+function [signal_mod] = LoRa_Tx(message,Bandwidth,SF,Pt,Fs,df,varargin)
 % LoRa_Tx emulates a Lora transmission
 %
 %   in:  message      payload message
 %        Bandwidth    signal bandwidth of LoRa transmisson  
 %        SF           spreading factor
-%        Pt   
+%        Pt           transmit power in deicbels
 %        Fs           sampling frequency
-%        dF
-%        varagin
+%        dF           frequency offset
+%        varargin{1}  code rate
+%        varargin{2}  symbols in preamble
+%        varargin{3}  sync key
 %
-%  out:  signal 
-%        packet   
+%  out:  signal       LoRa IQ waveform
+%        packet       encoded message
 %
 % Dr Bassel Al Homssi  
 % RMIT University 
+% Credit to rpp0 on https://github.com/rpp0/gr-lora
 
 if nargin == 6
     CR = 1 ;
@@ -35,7 +38,7 @@ end
 
 packet = LoRa_Encode_Full(message,SF,CR) ; % encode message
 signal = LoRa_Modulate_Full(packet,SF,Bandwidth,n_preamble,SyncKey,Fs) ; % LoRa modulate message
-signal_mod = 10.^(Pt./20).*signal.*exp(-j.*2.*pi.*df/Fs.*(0:length(signal)-1))' ; % frquency shift abd convert to power
+signal_mod = 10.^(Pt./20).*signal.*exp(-j.*2.*pi.*df/Fs.*(0:length(signal)-1))' ; % frquency shift and convert to power
 end
 function [packet] = LoRa_Encode_Full(message,SF,CR)
 % LoRa_Encode_Full emulates a Lora transmission
@@ -52,16 +55,16 @@ opt = 0 ;
 %% String to Decimal
 message_chr = convertStringsToChars(message) ;
 message_dbl = uint8(message_chr) ;
-%% Length Calculations
+%% Packet Length Calculations
 N_pld = (SF == 7).*1 + (SF == 8).*2 + (SF == 9).*3 + (SF == 10).*4 + (SF == 11).*5 + (SF == 12).*6 ;
 n_packet = 8 + max([ceil((8*(length(message_dbl) + 5) - 4.*SF + 28 + 16.*CRC_pld - 20.*imp)/(4.*(SF - 2.*opt))).*(CR + 4) 0]) ;
 n_wht = SF .* floor((n_packet-8)/(4 + CR)) + N_pld - 1 ;
 n_pld = ceil((n_wht + (SF == 7).*0 + (SF == 8).*1 + (SF == 9).*2 + (SF == 10).*3 + (SF == 11).*4 + (SF == 12).*5)/2) ;
 n_pad = n_pld - 5 - length(message_dbl) - CRC_pld.*2 ;
 %% Create payload message
-CRC_dbl = CRC_pld.*[1 1] ; %randi(255,1,2) ;
-pad_dbl = zeros(1,n_pad + N_pld - 1) ;
-pld_dbl = [255 255 0 0 message_dbl 0 CRC_dbl pad_dbl] ;
+CRC_dbl = CRC_pld.*[1 1] ; % CRC is not working atm
+pad_dbl = zeros(1,n_pad + N_pld - 1) ; % padding
+pld_dbl = [255 255 0 0 message_dbl 0 CRC_dbl pad_dbl] ; % LoRa payload
 %% Swap Nibbles
 pld_swp = LoRa_encode_swap(pld_dbl) ;
 %% Payload Encoding
@@ -95,7 +98,7 @@ function [symbols_swp] = LoRa_encode_swap(symbols)
 
 symbols_swp = zeros(1,length(symbols)) ;
 for ctr = 1 : length(symbols)
-    symbols_swp(ctr) = bitor(bitsll(bitand(symbols(ctr),hex2dec('0F')),4),bitsra(bitand(symbols(ctr),hex2dec('F0')),4)) ;
+    symbols_swp(ctr) = bitor(bitsll(bitand(symbols(ctr),hex2dec('0F')),4),bitsra(bitand(symbols(ctr),hex2dec('F0')),4)) ; % swap first half of 8-bit sequencne with other half 
 end
 end
 function [encoded] = LoRa_encode_hamming(symbols,CR)
@@ -106,10 +109,10 @@ function [encoded] = LoRa_encode_hamming(symbols,CR)
 %
 %  out:  encoded      hamming encoded symbols
 
-if CR > 2 && CR <= 4 % check word length
+if CR > 2 && CR <= 4 % detection and correction
     n = floor(length(symbols).*(4 + 4)/4) ;
     
-    H = [0,210,85,135,153,75,204,30,225,51,180,102,120,170,45,255] ; % Hamming sequence
+    H = [0,210,85,135,153,75,204,30,225,51,180,102,120,170,45,255] ; 
     
     encoded = zeros(1,n) ;
     Ctr = 1 ;
@@ -120,7 +123,7 @@ if CR > 2 && CR <= 4 % check word length
         encoded(Ctr+1) = H(s1+1) ;
         Ctr = Ctr + 2 ;
     end
-elseif CR > 0 && CR <= 2 % check word length
+elseif CR > 0 && CR <= 2 % detection
     Ctr = 1 ;
     for ctr = 1 : length(symbols)
         s0 = bitand(floor(bitsra(symbols(ctr),4)),hex2dec('FF')) ;
@@ -200,13 +203,14 @@ if DE == 0
             24,48,34,0,6,18,30,20,46,24,46,34,46,6,46,30,0,0,0,0,36,6] ;
     end
 end
-N = min([length(symbols) length(white_sequence)]) ;
-symbols_white = bitxor(symbols(1:N),white_sequence(1:N));
+N = min([length(symbols) length(white_sequence)]) ; % cut-off to length of transmit symbols
+symbols_white = bitxor(symbols(1:N),white_sequence(1:N)); % encode white
 end
 function [symbols_shuf] = LoRa_encode_shuffle(symbols)
-% LoRa_encode_shuffle swaps nibbles
+% LoRa_encode_shuffle shuffles symbols by a to combine header and
+% payload
 %
-%   in:  symbols            symbol sequence
+%   in:  symbols            symbol vector
 %
 %  out:  symbols_shuf       shuffle symbols
 
@@ -219,11 +223,12 @@ for Ctr = 1 : length(symbols)
 end
 end
 function [symbols_interleaved] = LoRa_encode_interleave(symbols,ppm,rdd)
-% LoRa_encode_interleave imposes transposition and digit shift on the symbols
+% LoRa_encode_interleave imposes transposition and digit shift on the
+% symbols and rotation
 %
 %   in:  symbols            symbol sequence
-%        ppm                codewords k
-%        rdd                row number r
+%        ppm                SF
+%        rdd                CR
 %
 %  out:  symbols_interleaved       interleaved symbols
 
@@ -232,10 +237,10 @@ sym_idx_ext = 1 ;
 for block_idx = 1 : floor(length(symbols)/(ppm))
     x = symbols((block_idx-1).*ppm+1:block_idx.*ppm) ;
     symbols_block_binary = de2bi(x,4+rdd) ;
-    symbols_block_binary_rotated = transpose(symbols_block_binary) ; % transposed k codewords
+    symbols_block_binary_rotated = transpose(symbols_block_binary) ; % transposed 
     symbols_block_rorated = bi2de(symbols_block_binary_rotated) ;
     mask = ppm ;
-    % shift k codewords to the left by r mod SF
+    % rotate
     for ctr = 1 : 4 + rdd
         sym_int(ctr) = rotl(symbols_block_rorated(ctr),mask,ppm) ;
         mask = mask - 1 ;
@@ -260,7 +265,7 @@ for ctr = 1 : length(symbols)
 end
 end
 function [symbol_rot] = selectbits_encode(symbol)
-% selectbits_encode concat zeros
+% selectbits_encode concat zeros (from 8-bit to 4-bit)
 %
 %   in:  symbols            symbol sequence
 %
@@ -271,13 +276,13 @@ symbol_binary_rot = [0 symbol_binary(1) symbol_binary(2) symbol_binary(3) 0 symb
 symbol_rot = bi2de(symbol_binary_rot) ;
 end
 function [y] = rotl(bits,count,size)
-% selectbits_encode concat zeros
+% rotl modulo rotation
 %
-%   in:  bits            symbol sequence
+%   in:  bits            bit sequence
 %        counts          
 %        size
 %
-%  out:  y               rotated symbols
+%  out:  y               symbols
 
 len_mask = bitsll(1,size) - 1 ;
 count = mod(count,size) ;
@@ -315,17 +320,14 @@ function [y] = loramod(x,SF,BW,fs,varargin)
 %        BW         signal bandwidth of LoRa transmisson  
 %        SF         spreading factor   
 %        Fs         sampling frequency
-%        varargin   variable length input to check for errors
-%                   or to change symbol to down chirp?
+%        varargin{1} polarity of chirp
 %
 %  out:  y          LoRa IQ waveform
-
-% Check number of input arguments
 if (nargin < 4)
     error(message('comm:pskmod:numarg1'));
 end
 
-if (nargin > 6)
+if (nargin > 5)
     error(message('comm:pskmod:numarg2'));
 end
 
@@ -334,7 +336,7 @@ if (~isreal(x) || any(any(ceil(x) ~= x)) || ~isnumeric(x))
     error(message('comm:pskmod:xreal1'));
 end
 
-M = 2^SF ; % Bits each symbol can represent
+M       = 2^SF ;
 
 % Check that M is a positive integer
 if (~isreal(M) || ~isscalar(M) || M<=0 || (ceil(M)~=M) || ~isnumeric(M))
@@ -346,27 +348,22 @@ if ((min(min(x)) < 0) || (max(max(x)) > (M-1)))
     error(message('comm:pskmod:xreal2'));
 end
 
+% Polarity of Chirp
 if nargin == 4
     Inv = 1 ;
 elseif nargin == 5
     Inv = varargin{1} ;
 end
+% Symbol Constants
+Ts      = 2^SF/BW ;
+Ns      = fs.*M/BW ;
 
-Ts = 2^SF/BW ; % symbol time
-beta = BW/Ts ; % time-frquency slope of lora chirp
-n_symbol = fs.*M/BW ; % samples per symbol
-t_symbol = (0:n_symbol-1).*1/fs ; % time per symbol
+gamma   = x/Ts ;
+beta    = BW/Ts ;
 
-% LoRa baseband waveform modulation
-y = [] ;
-% for loop due to the modulo associated with a lora chirp
-for ctr = 1 : length(x)
-    gamma = x(ctr)/Ts - BW/2 ; % y intercept
-    lambda = 1 - x(ctr)/M ;
-    t1 = t_symbol(1:end*lambda) ;
-    t2 = t_symbol(end*lambda+1:end) ;
-    y = [y; exp(-j.*2.*pi.*(t1'*gamma + beta/2*t1'.^2)*Inv); ...
-        exp(-j.*2.*pi.*(t2'*(-BW + gamma) + beta/2*t2'.^2)*Inv)] ;
-end
-y = reshape(y,1,numel(y))' ;
+time    = (0:Ns-1)'.*1/fs ;
+freq    = mod(gamma + Inv.*beta.*time,BW) - BW/2 ;
+
+Theta   = cumtrapz(time,freq) ;
+y       = reshape(exp(j.*2.*pi.*Theta),numel(Theta),1) ;
 end
